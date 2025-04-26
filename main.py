@@ -14,7 +14,7 @@ import base64
 load_dotenv()
 
 # Initialize OpenAI client
-print(os.getenv('OPENAI_API_KEY'), 'API KEY!!!')
+print(os.getenv('OPENAI_API_KEY'), 'API KEY!! 111!')
 client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 app = FastAPI(title="Image Comparison API")
@@ -91,7 +91,7 @@ async def compare_faces(
     image2: UploadFile = File(...)
 ):
     """
-    Compare two face images and return analysis results with explanation.
+    Compare two face images and return analysis results with explanation and confidence (as a percentage).
     """
     try:
         # Read image files
@@ -101,12 +101,22 @@ async def compare_faces(
         # Analyze faces
         analysis_result = await analyze_faces(img1_bytes, img2_bytes)
         
+        # Calculate confidence as a percentage
+        distance = analysis_result.get('distance', None)
+        threshold = analysis_result.get('threshold', None)
+        if distance is not None and threshold is not None:
+            confidence = 1 - min(1, distance / threshold)
+            confidence_percent = round(confidence * 100, 2)
+        else:
+            confidence_percent = None
+
         # Generate explanation
-        explanation = await generate_comparison_explanation(analysis_result)
+        # explanation = await generate_comparison_explanation(analysis_result)
 
         return {
             "analysis": analysis_result,
-            "explanation": explanation
+            "confidence_percent": confidence_percent,
+            "explanation": "explanation"
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
