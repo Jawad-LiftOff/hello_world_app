@@ -1,6 +1,8 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException
 from services.face_utils import analyze_faces
+from deepface import DeepFace
 import os
+import tempfile
 
 router = APIRouter()
 
@@ -33,52 +35,43 @@ async def compare_faces(
 
 @router.post(
     "/compare-with-employees/",
-    summary="Compare Image With Employees Folder",
-    description="Upload an image (e.g., from your camera). The API will compare it with all images in the reference_pictures folder and return the best match, including the file name."
+    summary="Compare Image With Employees Folder (Fast)",
+    description="Upload an image. The API will compare it with all images in the reference_pictures folder using DeepFace's fast search."
 )
 async def compare_with_employees(
     image: UploadFile = File(..., description="Image file to compare (e.g., from your camera)")
 ):
     """
-    Compare an uploaded image with all images in the reference_pictures folder.
+    Compare an uploaded image with all images in the reference_pictures folder using DeepFace.find.
     Returns the best match (if any) with confidence and the matched file name.
     """
-    img_bytes = await image.read()
     folder_path = "reference_pictures"
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=500, detail="Reference folder does not exist.")
-    reference_files = [
-        f for f in os.listdir(folder_path)
-        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-    ]
-    if not reference_files:
-        raise HTTPException(status_code=404, detail="No reference images found.")
-    best_result = None
-    best_file = None
-    best_confidence = -1
-    for ref_file in reference_files:
-        ref_path = os.path.join(folder_path, ref_file)
-        with open(ref_path, "rb") as f:
-            ref_bytes = f.read()
-        try:
-            result = await analyze_faces(img_bytes, ref_bytes)
-            distance = result.get('distance', None)
-            threshold = result.get('threshold', None)
-            if distance is not None and threshold is not None:
-                confidence = 1 - min(1, distance / threshold)
-            else:
-                confidence = 0
-            if confidence > best_confidence:
-                best_confidence = confidence
-                best_result = result
-                best_file = ref_file
-        except Exception:
-            continue
-    if best_result is None:
-        return {"match": False, "message": "No matches found."}
-    return {
-        "match": best_result.get('verified', False),
-        "reference_file": best_file,
-        "confidence_percent": round(best_confidence * 100, 2),
-        "analysis": best_result
-    } 
+
+    # Save uploaded image to a temp file
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp.write(await image.read())
+        tmp_path = tmp.name
+
+    try:
+        results = DeepFace.find(
+            img_path=tmp_path,
+            db_path=folder_path,
+            model_name="ArcFace",  # or your preferred model
+            enforce_detection=True
+        )
+        # results is a list of DataFrames, one per model (if multiple models used)
+        # We'll use the first DataFrame
+        if len(results) > 0 and not results[0].empty:
+            best_match = results[0].iloc[0]
+            return {
+                "match": True,
+                "employee": os.path.basename(best_match['identity']),
+                "distance": float(best_match['distance']),
+                "confidence_percent": round((1 - min(1, best_match['distance'] / best_match['threshold'])) * 100, 2)
+            }
+        else:
+            return {"match": False, "employee": "Unknown", "confidence_percent": None}
+    finally:
+        os.remove(tmp_path) 
