@@ -16,8 +16,8 @@ async def analyze_faces(img1_bytes: bytes, img2_bytes: bytes):
         result = DeepFace.verify(
             img1_path=temp_path1,
             img2_path=temp_path2,
-            model_name="VGG-Face",
-            enforce_detection=False
+            model_name="ArcFace",
+            enforce_detection=True
         )
         os.remove(temp_path1)
         os.remove(temp_path2)
