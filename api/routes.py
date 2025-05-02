@@ -1,10 +1,42 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException
 from services.face_utils import analyze_faces
-from deepface import DeepFace
+# from deepface import DeepFace
+# from lightphe import LightPHE
+import numpy as np
 import os
 import tempfile
+import insightface
+from PIL import Image
+from io import BytesIO
 
 router = APIRouter()
+
+# Load model and cache reference embeddings at module level
+model = insightface.app.FaceAnalysis(name="buffalo_l", providers=['CPUExecutionProvider'])
+model.prepare(ctx_id=0)
+
+reference_embeddings = {}
+reference_names = []
+
+def get_reference_embeddings(folder_path="reference_pictures"):
+    global reference_embeddings, reference_names
+    if reference_embeddings:
+        return reference_embeddings, reference_names
+    reference_embeddings = {}
+    reference_names = []
+    for file in os.listdir(folder_path):
+        if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+            img_path = os.path.join(folder_path, file)
+            img = np.array(Image.open(img_path).convert("RGB"))
+            faces = model.get(img)
+            if faces:
+                emb = faces[0].embedding
+                reference_embeddings[file] = emb
+                reference_names.append(file)
+    return reference_embeddings, reference_names
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 @router.post(
     "/compare-faces/",
@@ -35,43 +67,48 @@ async def compare_faces(
 
 @router.post(
     "/compare-with-employees/",
-    summary="Compare Image With Employees Folder (Fast)",
-    description="Upload an image. The API will compare it with all images in the reference_pictures folder using DeepFace's fast search."
+    summary="Compare Image With Employees Folder (InsightFace)",
+    description="Upload an image. The API will compare it with all images in the reference_pictures folder using InsightFace embeddings."
 )
 async def compare_with_employees(
     image: UploadFile = File(..., description="Image file to compare (e.g., from your camera)")
 ):
-    """
-    Compare an uploaded image with all images in the reference_pictures folder using DeepFace.find.
-    Returns the best match (if any) with confidence and the matched file name.
-    """
     folder_path = "reference_pictures"
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=500, detail="Reference folder does not exist.")
 
-    # Save uploaded image to a temp file
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        tmp.write(await image.read())
-        tmp_path = tmp.name
+    # Read uploaded image
+    img_bytes = await image.read()
+    img = np.array(Image.open(BytesIO(img_bytes)).convert("RGB"))
 
-    try:
-        results = DeepFace.find(
-            img_path=tmp_path,
-            db_path=folder_path,
-            model_name="ArcFace",  # or your preferred model
-            enforce_detection=True
-        )
-        # results is a list of DataFrames, one per model (if multiple models used)
-        # We'll use the first DataFrame
-        if len(results) > 0 and not results[0].empty:
-            best_match = results[0].iloc[0]
-            return {
-                "match": True,
-                "employee": os.path.basename(best_match['identity']),
-                "distance": float(best_match['distance']),
-                "confidence_percent": round((1 - min(1, best_match['distance'] / best_match['threshold'])) * 100, 2)
-            }
-        else:
-            return {"match": False, "employee": "Unknown", "confidence_percent": None}
-    finally:
-        os.remove(tmp_path) 
+    # Get embedding for uploaded image
+    faces = model.get(img)
+    if not faces:
+        return {"match": False, "employee": "Unknown", "similarity": None}
+    query_emb = faces[0].embedding
+
+    # Get reference embeddings
+    ref_embs, ref_names = get_reference_embeddings(folder_path)
+
+    # Compare
+    best_similarity = -1
+    best_file = None
+    for name, emb in ref_embs.items():
+        sim = cosine_similarity(query_emb, emb)
+        if sim > best_similarity:
+            best_similarity = sim
+            best_file = name
+
+    threshold = 0.5  # You may want to tune this threshold
+    if best_similarity > threshold:
+        return {
+            "match": True,
+            "employee": best_file,
+            "similarity": float(best_similarity)
+        }
+    else:
+        return {
+            "match": False,
+            "employee": "Unknown",
+            "similarity": float(best_similarity)
+        } 
